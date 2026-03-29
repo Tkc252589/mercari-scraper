@@ -1,5 +1,6 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const app = express();
 app.use(express.json());
 
@@ -9,11 +10,13 @@ async function scrapeMercari(type, query, maxItems) {
   let browser;
   try {
     browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      headless: true
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless
     });
     const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
     let url = '';
     if (type === 'keyword') {
@@ -24,16 +27,16 @@ async function scrapeMercari(type, query, maxItems) {
       url = 'https://jp.mercari.com/user/profile/' + query;
     }
     
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    await page.waitForSelector('li[data-testid="item-cell"], [data-testid="merListItem"], .item-cell', { timeout: 15000 }).catch(() => {});
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    
+    await new Promise(r => setTimeout(r, 3000));
     
     const items = await page.evaluate((maxCount) => {
       const results = [];
       const selectors = [
         'li[data-testid="item-cell"]',
         '[data-testid="merListItem"]',
-        'a[href*="/item/m"]',
-        '[class*="item"]'
+        'a[href*="/item/m"]'
       ];
       
       let itemEls = [];
@@ -54,13 +57,13 @@ async function scrapeMercari(type, query, maxItems) {
           const priceEl = el.querySelector('[class*="price"], [data-testid*="price"]');
           const titleEl = el.querySelector('[class*="name"], [data-testid*="name"], [class*="title"]');
           
-          const url = href.split('?')[0];
+          const itemUrl = href.split('?')[0];
           const image = imgEl ? (imgEl.src || imgEl.getAttribute('data-src') || '') : '';
           const price = priceEl ? priceEl.textContent.replace(/[^0-9]/g, '') : '';
           const title = titleEl ? titleEl.textContent.trim() : '';
           
-          if (url && url.includes('/item/m')) {
-            results.push({ url, image, price, title });
+          if (itemUrl && itemUrl.includes('/item/m')) {
+            results.push({ url: itemUrl, image, price, title });
           }
         } catch(e) {}
       }
