@@ -27,9 +27,13 @@ async function scrapeMercari(type, query, maxItems) {
       url = 'https://jp.mercari.com/user/profile/' + query;
     }
     
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    } catch(e) {
+      console.log('goto timeout (continuing):', e.message.substring(0,100));
+    }
     
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 2000));
     
     const items = await page.evaluate((maxCount) => {
       const results = [];
@@ -70,8 +74,10 @@ async function scrapeMercari(type, query, maxItems) {
       return results;
     }, maxItems || 30);
     
+    console.log('Scraped ' + items.length + ' items for ' + type + ':' + query);
     return { success: true, items };
   } catch (err) {
+    console.log('Error:', err.message.substring(0,200));
     return { success: false, error: err.message, items: [] };
   } finally {
     if (browser) await browser.close();
@@ -87,6 +93,7 @@ app.get('/scrape', async (req, res) => {
   if (!type || !query) {
     return res.status(400).json({ error: 'type and query are required' });
   }
+  console.log('Scrape: ' + type + '=' + query);
   const result = await scrapeMercari(type, query, parseInt(max) || 30);
   res.json(result);
 });
