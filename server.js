@@ -1,86 +1,215 @@
 const express = require('express');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-async function scrapeMercari(type, query, maxItems) {
-  let browser;
+// Mercari API経由でキーワード検索
+async function searchByKeyword(keyword, maxItems) {
   try {
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless
+    const fetch = (await import('node-fetch')).default;
+    
+    // Mercari Search API
+    const searchUrl = 'https://api.mercari.jp/v2/entities:search';
+    const body = {
+      pageSize: maxItems || 30,
+      pageToken: '',
+      searchSessionId: Math.random().toString(36).substr(2, 9),
+      indexRouting: 'INDEX_ROUTING_UNSPECIFIED',
+      thumbnailTypes: [],
+      searchCondition: {
+        keyword: keyword,
+        sortBy: 'SORT_BY_CREATED_TIME',
+        order: 'ORDER_DESC',
+        status: ['STATUS_ON_SALE'],
+        categoryId: [],
+        brandId: [],
+        sellerId: [],
+        priceMin: 0,
+        priceMax: 0,
+        itemTypes: [],
+        skuIds: [],
+        shippingMethodId: ''
+      },
+      defaultDatasets: ['DATASET_TYPE_MERCARI', 'DATASET_TYPE_BEYOND'],
+      serviceFrom: 'suruga',
+      userId: '',
+      withItemBrand: true,
+      withItemSize: false,
+      withItemPromotions: false,
+      withRecommendBanner: false
+    };
+    
+    const res = await fetch(searchUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Platform': 'web',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://jp.mercari.com',
+        'Referer': 'https://jp.mercari.com/'
+      },
+      body: JSON.stringify(body),
+      timeout: 20000
     });
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    let url = '';
-    if (type === 'keyword') {
-      url = 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(query) + '&status=on_sale';
-    } else if (type === 'shop') {
-      url = 'https://mercari-shops.com/shops/' + query;
-    } else if (type === 'user') {
-      url = 'https://jp.mercari.com/user/profile/' + query;
+    if (!res.ok) {
+      console.log('API error:', res.status, res.statusText);
+      return [];
     }
     
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    } catch(e) {
-      console.log('goto timeout (continuing):', e.message.substring(0,100));
-    }
+    const data = await res.json();
+    const items = (data.items || []).map(item => ({
+      url: 'https://jp.mercari.com/item/' + item.id,
+      image: item.thumbnails && item.thumbnails[0] ? item.thumbnails[0] : '',
+      price: String(item.price || ''),
+      title: item.name || ''
+    }));
     
-    await new Promise(r => setTimeout(r, 2000));
-    
-    const items = await page.evaluate((maxCount) => {
-      const results = [];
-      const selectors = [
-        'li[data-testid="item-cell"]',
-        '[data-testid="merListItem"]',
-        'a[href*="/item/m"]'
-      ];
-      
-      let itemEls = [];
-      for (const sel of selectors) {
-        itemEls = Array.from(document.querySelectorAll(sel));
-        if (itemEls.length > 0) break;
-      }
-      
-      for (let i = 0; i < Math.min(itemEls.length, maxCount); i++) {
-        const el = itemEls[i];
-        try {
-          const linkEl = el.tagName === 'A' ? el : el.querySelector('a[href*="/item/"]');
-          if (!linkEl) continue;
-          const href = linkEl.href || '';
-          if (!href.includes('/item/m')) continue;
-          
-          const imgEl = el.querySelector('img');
-          const priceEl = el.querySelector('[class*="price"], [data-testid*="price"]');
-          const titleEl = el.querySelector('[class*="name"], [data-testid*="name"], [class*="title"]');
-          
-          const itemUrl = href.split('?')[0];
-          const image = imgEl ? (imgEl.src || imgEl.getAttribute('data-src') || '') : '';
-          const price = priceEl ? priceEl.textContent.replace(/[^0-9]/g, '') : '';
-          const title = titleEl ? titleEl.textContent.trim() : '';
-          
-          if (itemUrl && itemUrl.includes('/item/m')) {
-            results.push({ url: itemUrl, image, price, title });
-          }
-        } catch(e) {}
-      }
-      return results;
-    }, maxItems || 30);
-    
-    console.log('Scraped ' + items.length + ' items for ' + type + ':' + query);
-    return { success: true, items };
+    console.log('keyword search:', keyword, '->', items.length, 'items');
+    return items;
   } catch (err) {
-    console.log('Error:', err.message.substring(0,200));
-    return { success: false, error: err.message, items: [] };
-  } finally {
-    if (browser) await browser.close();
+    console.log('searchByKeyword error:', err.message);
+    return [];
+  }
+}
+
+// メルカリショップ（puppeteer不要版 - HTMLパース）
+async function searchByShop(shopId, maxItems) {
+  try {
+    const fetch = (await import('node-fetch')).default;
+    // Shop検索はAPIが別なのでHTMLスクレイピング継続
+    // まずショップのAPIを試す
+    const url = 'https://api.mercari.jp/v2/entities:search';
+    const body = {
+      pageSize: maxItems || 30,
+      pageToken: '',
+      searchSessionId: Math.random().toString(36).substr(2, 9),
+      indexRouting: 'INDEX_ROUTING_UNSPECIFIED',
+      thumbnailTypes: [],
+      searchCondition: {
+        keyword: '',
+        sortBy: 'SORT_BY_CREATED_TIME',
+        order: 'ORDER_DESC',
+        status: ['STATUS_ON_SALE'],
+        categoryId: [],
+        brandId: [],
+        sellerId: [shopId],
+        priceMin: 0,
+        priceMax: 0,
+        itemTypes: [],
+        skuIds: [],
+        shippingMethodId: ''
+      },
+      defaultDatasets: ['DATASET_TYPE_MERCARI'],
+      serviceFrom: 'suruga',
+      userId: '',
+      withItemBrand: true,
+      withItemSize: false,
+      withItemPromotions: false,
+      withRecommendBanner: false
+    };
+    
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Platform': 'web',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://jp.mercari.com',
+        'Referer': 'https://jp.mercari.com/'
+      },
+      body: JSON.stringify(body),
+      timeout: 20000
+    });
+    
+    if (!res.ok) {
+      console.log('shop API error:', res.status);
+      return [];
+    }
+    
+    const data = await res.json();
+    const items = (data.items || []).map(item => ({
+      url: 'https://jp.mercari.com/item/' + item.id,
+      image: item.thumbnails && item.thumbnails[0] ? item.thumbnails[0] : '',
+      price: String(item.price || ''),
+      title: item.name || ''
+    }));
+    
+    console.log('shop search:', shopId, '->', items.length, 'items');
+    return items;
+  } catch (err) {
+    console.log('searchByShop error:', err.message);
+    return [];
+  }
+}
+
+// ユーザー出品検索
+async function searchByUser(userId, maxItems) {
+  try {
+    const fetch = (await import('node-fetch')).default;
+    const url = 'https://api.mercari.jp/v2/entities:search';
+    const body = {
+      pageSize: maxItems || 30,
+      pageToken: '',
+      searchSessionId: Math.random().toString(36).substr(2, 9),
+      indexRouting: 'INDEX_ROUTING_UNSPECIFIED',
+      thumbnailTypes: [],
+      searchCondition: {
+        keyword: '',
+        sortBy: 'SORT_BY_CREATED_TIME',
+        order: 'ORDER_DESC',
+        status: ['STATUS_ON_SALE'],
+        categoryId: [],
+        brandId: [],
+        sellerId: [],
+        priceMin: 0,
+        priceMax: 0,
+        itemTypes: [],
+        skuIds: [],
+        shippingMethodId: ''
+      },
+      defaultDatasets: ['DATASET_TYPE_MERCARI'],
+      serviceFrom: 'suruga',
+      userId: userId,
+      withItemBrand: true,
+      withItemSize: false,
+      withItemPromotions: false,
+      withRecommendBanner: false
+    };
+    
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Platform': 'web',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://jp.mercari.com',
+        'Referer': 'https://jp.mercari.com/'
+      },
+      body: JSON.stringify(body),
+      timeout: 20000
+    });
+    
+    if (!res.ok) {
+      console.log('user API error:', res.status);
+      return [];
+    }
+    
+    const data = await res.json();
+    const items = (data.items || []).map(item => ({
+      url: 'https://jp.mercari.com/item/' + item.id,
+      image: item.thumbnails && item.thumbnails[0] ? item.thumbnails[0] : '',
+      price: String(item.price || ''),
+      title: item.name || ''
+    }));
+    
+    console.log('user search:', userId, '->', items.length, 'items');
+    return items;
+  } catch (err) {
+    console.log('searchByUser error:', err.message);
+    return [];
   }
 }
 
@@ -93,9 +222,23 @@ app.get('/scrape', async (req, res) => {
   if (!type || !query) {
     return res.status(400).json({ error: 'type and query are required' });
   }
-  console.log('Scrape: ' + type + '=' + query);
-  const result = await scrapeMercari(type, query, parseInt(max) || 30);
-  res.json(result);
+  
+  console.log('Scrape:', type, '=', query);
+  
+  let items = [];
+  try {
+    if (type === 'keyword') {
+      items = await searchByKeyword(query, parseInt(max) || 30);
+    } else if (type === 'shop') {
+      items = await searchByShop(query, parseInt(max) || 30);
+    } else if (type === 'user') {
+      items = await searchByUser(query, parseInt(max) || 30);
+    }
+    res.json({ success: true, items });
+  } catch (err) {
+    console.log('scrape error:', err.message);
+    res.json({ success: false, error: err.message, items: [] });
+  }
 });
 
 app.listen(PORT, () => {
